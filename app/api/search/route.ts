@@ -7,11 +7,11 @@ const clean=(s:string)=>s.replace(/<[^>]*>/g,' ').replace(/&nbsp;|&#160;/g,' ').
 function numberMatch(text:string,patterns:RegExp[]):number|null{for(const re of patterns){const m=text.match(re);if(m){const v=Number(m[1].replace(/\./g,'').replace(',','.'));if(Number.isFinite(v)&&v>0)return v;}}return null;}
 function parsePage(html:string,url:string,source:string):Listing|null{
  const text=clean(html);
- const title=clean((html.match(/<title[^>]*>([\\s\\S]*?)<\\/title>/i)||[])[1]||'');
+ const title=clean((html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)||[])[1]||'');
  let pathname='';try{pathname=new URL(url).pathname;}catch{return null;}
- if(/\\/buscar\\/|oficinas-alquiler\\/oficinas-alquiler|\\/oficinas-alquiler\\/oficinas$/i.test(pathname))return null;
+ if(/\/buscar\/|oficinas-alquiler\/oficinas-alquiler|\/oficinas-alquiler\/oficinas$/i.test(pathname))return null;
  if(!/(alquiler|rent)/i.test(title)||/(venta|sale|coworking|centro de negocios)/i.test(title)||!/(oficina|office)/i.test(title))return null;
- if(!/\\b280\\d{2}\\b/.test(text))return null;
+ if(!/\b280\d{2}\b/.test(text))return null;
  const area=numberMatch(text,[/(?:superficie|área|area|surface)[^\d]{0,35}(\d[\d.]*[,]?\d*)\s*m(?:2|²)/i,/(\d[\d.]*[,]?\d*)\s*m(?:2|²)/i]);
  const rent=numberMatch(text,[/(\d[\d.]*[,]?\d*)\s*€\s*\/\s*m(?:2|²)\s*\/\s*(?:mes|month)/i,/(?:renta|alquiler|rent)[^\d]{0,40}(\d[\d.]*[,]?\d*)\s*€/i]);
  const address=clean((html.match(/(?:address|streetAddress)[^>:"']{0,20}["']([^"']{8,120})["']/i)||[])[1]||'Madrid capital · dirección por confirmar');

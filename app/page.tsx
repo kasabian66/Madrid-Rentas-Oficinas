@@ -197,7 +197,7 @@ export default function Home() {
         cost(item).total ?? '', item.source, item.checkedAt, item.url,
       ]),
     ];
-    const csv = '\\ufeff' + rows.map((row) => row.map(csvCell).join(';')).join('\\r\\n');
+    const csv = '\ufeff' + rows.map((row) => row.map(csvCell).join(';')).join('\r\n');
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
     const objectUrl = URL.createObjectURL(blob);
     const anchor = document.createElement('a');

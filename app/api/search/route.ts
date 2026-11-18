@@ -108,6 +108,18 @@ function unwrap(href: string): string {
   } catch { return href; }
 }
 
+function extractBingResultLinks(xml: string, domain: string): string[] {
+  const links: string[] = [];
+  for (const item of xml.matchAll(/<item[\\s\\S]*?<link>([\\s\\S]*?)<\\/link>[\\s\\S]*?<\\/item>/gi)) {
+    const href = decode(item[1].trim()).replace(/&amp;/g, '&');
+    try {
+      const parsed = new URL(href);
+      if (isAllowedHost(parsed, domain) && !links.includes(parsed.href)) links.push(parsed.href);
+    } catch { /* Ignore non-URL RSS links. */ }
+  }
+  return links.slice(0, 5);
+}
+
 function isAllowedHost(url: URL, domain: string): boolean {
   return url.protocol === 'https:' && (url.hostname === domain || url.hostname.endsWith('.' + domain));
 }
@@ -138,8 +150,9 @@ export async function GET(request: Request) {
     try {
       const params = new URLSearchParams({
         q: 'oficinas en alquiler ' + queryText + ' Madrid site:' + source.domain + ' -venta -coworking',
+        format: 'rss',
       });
-      const response = await fetch('https://html.duckduckgo.com/html/?' + params.toString(), {
+      const response = await fetch('https://www.bing.com/search?' + params.toString(), {
         headers: { 'User-Agent': 'Mozilla/5.0 (compatible; MadridOfficeMarket/2.1)', Accept: 'text/html' },
         signal: AbortSignal.timeout(10000), cache: 'no-store',
       });
@@ -147,7 +160,9 @@ export async function GET(request: Request) {
         diagnostics.push({ source: source.name, candidates: 0, extracted: 0, issue: 'Buscador HTTP ' + response.status });
         return [];
       }
-      candidates = extractResultLinks(await response.text(), source.domain);
+      const searchBody = await response.text();
+      candidates = extractBingResultLinks(searchBody, source.domain);
+      if (candidates.length === 0) candidates = extractResultLinks(searchBody, source.domain);
       const parsed = await Promise.all(candidates.map(async (candidate) => {
         try {
           const page = await fetch(candidate, {

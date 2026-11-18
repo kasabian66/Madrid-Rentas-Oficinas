@@ -101,47 +101,39 @@ function parsePage(html: string, url: string, source: string): Listing | null {
   };
 }
 
-function unwrap(href: string): string {
-  try {
-    const url = new URL(decode(href), 'https://duckduckgo.com');
-    return url.searchParams.get('uddg') || url.href;
-  } catch { return href; }
-}
+async function searchTavily(query: string, domain: string): Promise<string[]> {
+  const apiKey = process.env.TAVILY_API_KEY;
+  if (!apiKey) throw new Error('Falta configurar TAVILY_API_KEY en Vercel');
 
-function extractBingResultLinks(xml: string, domain: string): string[] {
-  const links: string[] = [];
-  const items = xml.split(/<item[^>]*>/i).slice(1);
-  for (const item of items) {
-    const block = item.split(/<\/item>/i)[0] || '';
-    const match = block.match(/<link[^>]*>([^<]+)<\/link>/i);
-    if (!match?.[1]) continue;
-    const href = decode(match[1].trim());
-    try {
-      const parsed = new URL(href);
-      if (isAllowedHost(parsed, domain) && !links.includes(parsed.href)) links.push(parsed.href);
-    } catch { /* Ignore non-URL RSS links. */ }
-  }
-  return links.slice(0, 5);
+  const response = await fetch('https://api.tavily.com/search', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      api_key: apiKey,
+      query,
+      search_depth: 'basic',
+      topic: 'general',
+      max_results: 5,
+      include_domains: [domain],
+      include_answer: false,
+    }),
+    signal: AbortSignal.timeout(15000),
+    cache: 'no-store',
+  });
+
+  if (!response.ok) throw new Error('Tavily HTTP ' + response.status);
+  const data = await response.json() as { results?: { url?: string }[] };
+  return (data.results ?? [])
+    .map((item) => item.url)
+    .filter((url): url is string => {
+      if (!url) return false;
+      try { return isAllowedHost(new URL(url), domain); } catch { return false; }
+    })
+    .slice(0, 5);
 }
 
 function isAllowedHost(url: URL, domain: string): boolean {
   return url.protocol === 'https:' && (url.hostname === domain || url.hostname.endsWith('.' + domain));
-}
-
-function extractResultLinks(html: string, domain: string): string[] {
-  const links: string[] = [];
-  for (const match of html.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/gi)) {
-    const attrs = match[1];
-    // Do not depend on DuckDuckGo CSS classes: its result markup changes frequently.
-    const href = attrs.match(/\bhref\s*=\s*["']([^"']+)["']/i)?.[1];
-    if (!href) continue;
-    const target = unwrap(href);
-    try {
-      const parsed = new URL(target);
-      if (isAllowedHost(parsed, domain) && !links.includes(parsed.href)) links.push(parsed.href);
-    } catch { /* Ignore malformed search result URLs. */ }
-  }
-  return links.slice(0, 5);
 }
 
 export async function GET(request: Request) {
@@ -152,21 +144,10 @@ export async function GET(request: Request) {
   const perSource = await Promise.all(sources.map(async (source) => {
     let candidates: string[] = [];
     try {
-      const params = new URLSearchParams({
-        q: 'oficinas en alquiler ' + queryText + ' Madrid site:' + source.domain + ' -venta -coworking',
-        format: 'rss',
-      });
-      const response = await fetch('https://www.bing.com/search?' + params.toString(), {
-        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; MadridOfficeMarket/2.1)', Accept: 'application/rss+xml, application/xml, text/xml, text/html;q=0.9' },
-        signal: AbortSignal.timeout(10000), cache: 'no-store',
-      });
-      if (!response.ok) {
-        diagnostics.push({ source: source.name, candidates: 0, extracted: 0, issue: 'Buscador HTTP ' + response.status });
-        return [];
-      }
-      const searchBody = await response.text();
-      candidates = extractBingResultLinks(searchBody, source.domain);
-      if (candidates.length === 0) candidates = extractResultLinks(searchBody, source.domain);
+      candidates = await searchTavily(
+        'oficinas en alquiler ' + queryText + ' Madrid capital. Excluir venta, coworking y centros de negocios.',
+        source.domain,
+      );
       const parsed = await Promise.all(candidates.map(async (candidate) => {
         try {
           const page = await fetch(candidate, {
@@ -184,7 +165,7 @@ export async function GET(request: Request) {
     } catch (error) {
       diagnostics.push({
         source: source.name, candidates: candidates.length, extracted: 0,
-        issue: error instanceof Error ? error.name : 'Error de consulta',
+        issue: error instanceof Error ? error.message : 'Error de consulta',
       });
       return [];
     }
@@ -198,7 +179,7 @@ export async function GET(request: Request) {
     listings: unique,
     message: unique.length
       ? 'Fichas con superficie y renta identificables. Comunidad e IBI solo se muestran cuando se detectan con una unidad y un periodo claros.'
-      : 'La búsqueda se ha ejecutado, pero no se han podido extraer fichas verificables. Consulta el detalle por fuente o añade anuncios manualmente.',
+      : diagnostics.some((item) => item.issue?.includes('TAVILY_API_KEY')) ? 'Falta configurar la clave gratuita de Tavily en Vercel.' : 'La búsqueda se ha ejecutado, pero no se han podido extraer fichas verificables. Consulta el detalle por fuente o añade anuncios manualmente.',
     sources: sources.map((source) => source.name),
     diagnostics,
   }, { headers: { 'Cache-Control': 'no-store' } });

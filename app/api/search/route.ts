@@ -110,8 +110,12 @@ function unwrap(href: string): string {
 
 function extractBingResultLinks(xml: string, domain: string): string[] {
   const links: string[] = [];
-  for (const item of xml.matchAll(/<item[\\s\\S]*?<link>([\\s\\S]*?)<\\/link>[\\s\\S]*?<\\/item>/gi)) {
-    const href = decode(item[1].trim()).replace(/&amp;/g, '&');
+  const items = xml.split(/<item[^>]*>/i).slice(1);
+  for (const item of items) {
+    const block = item.split(/<\\/item>/i)[0] || '';
+    const match = block.match(/<link[^>]*>([^<]+)<\\/link>/i);
+    if (!match?.[1]) continue;
+    const href = decode(match[1].trim());
     try {
       const parsed = new URL(href);
       if (isAllowedHost(parsed, domain) && !links.includes(parsed.href)) links.push(parsed.href);

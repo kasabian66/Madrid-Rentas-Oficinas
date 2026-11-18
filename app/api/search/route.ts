@@ -157,7 +157,7 @@ export async function GET(request: Request) {
         format: 'rss',
       });
       const response = await fetch('https://www.bing.com/search?' + params.toString(), {
-        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; MadridOfficeMarket/2.1)', Accept: 'text/html' },
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; MadridOfficeMarket/2.1)', Accept: 'application/rss+xml, application/xml, text/xml, text/html;q=0.9' },
         signal: AbortSignal.timeout(10000), cache: 'no-store',
       });
       if (!response.ok) {

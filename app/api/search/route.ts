@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+export const maxDuration = 60;
 
 type Listing = {
   id: string; title: string; address: string; district: string;
@@ -18,16 +19,14 @@ const sources = [
   { name: 'Cushman & Wakefield', domain: 'cushmanwakefield.com' },
 ];
 
-const clean = (value: string) => value
+const decode = (value: string) => value
+  .replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'")
+  .replace(/&nbsp;|&#160;/g, ' ').replace(/&#x2F;/gi, '/');
+
+const clean = (value: string) => decode(value)
   .replace(/<script[\s\S]*?<\/script>/gi, ' ')
   .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-  .replace(/<[^>]*>/g, ' ')
-  .replace(/&nbsp;|&#160;/g, ' ')
-  .replace(/&amp;/g, '&')
-  .replace(/&quot;/g, '"')
-  .replace(/&#39;|&apos;/g, "'")
-  .replace(/\s+/g, ' ')
-  .trim();
+  .replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
 
 function parseNumber(raw: string): number | null {
   const value = raw.replace(/\s/g, '');
@@ -49,19 +48,16 @@ function findNumber(text: string, patterns: RegExp[]): number | null {
   return null;
 }
 
-// Only accept explicit €/m² rates; ambiguous total amounts are not guessed.
 function monthlyRate(text: string, labels: string[]): number | null {
   const label = labels.join('|');
-  const monthly = findNumber(text, [
-    new RegExp('(?:' + label + ')[^\\d]{0,90}(\\d[\\d.,]*)\\s*€?\\s*[/·]\\s*m(?:2|²)\\s*[/·]\\s*(?:mes|month)', 'i'),
-    new RegExp('(\\d[\\d.,]*)\\s*€\\s*[/·]\\s*m(?:2|²)\\s*[/·]\\s*(?:mes|month)[^\\w]{0,20}(?:' + label + ')', 'i'),
-  ]);
-  if (monthly !== null) return monthly;
-  const annual = findNumber(text, [
-    new RegExp('(?:' + label + ')[^\\d]{0,90}(\\d[\\d.,]*)\\s*€?\\s*[/·]\\s*m(?:2|²)\\s*[/·]\\s*(?:año|anual|year)', 'i'),
-    new RegExp('(\\d[\\d.,]*)\\s*€\\s*[/·]\\s*m(?:2|²)\\s*[/·]\\s*(?:año|anual|year)[^\\w]{0,20}(?:' + label + ')', 'i'),
-  ]);
-  return annual === null ? null : annual / 12;
+  const unit = '(?:€\\s*)?[/·]\\s*m(?:2|²)\\s*[/·]\\s*(?:mes|month|año|anual|year)';
+  const labelled = new RegExp('(?:' + label + ')[^0-9]{0,120}([0-9][0-9.,]*)\\s*' + unit, 'i');
+  const reversed = new RegExp('([0-9][0-9.,]*)\\s*' + unit + '[^A-Za-z]{0,30}(?:' + label + ')', 'i');
+  const match = text.match(labelled) || text.match(reversed);
+  if (!match?.[1]) return null;
+  const amount = parseNumber(match[1]);
+  if (amount === null) return null;
+  return /(?:año|anual|year)/i.test(match[0]) ? amount / 12 : amount;
 }
 
 function extractDistrict(text: string): string {
@@ -79,18 +75,20 @@ function parsePage(html: string, url: string, source: string): Listing | null {
   try { parsedUrl = new URL(url); } catch { return null; }
   const text = clean(html);
   const title = clean((html.match(/<title[^>]*>([\s\S]*?)<\/title>/i) ?? [])[1] ?? '');
-  if (!/(alquiler|rent|lease)/i.test(title) || /(venta|sale|coworking|centro de negocios)/i.test(title) || !/(oficina|office)/i.test(title)) return null;
-  if (!/\b280\d{2}\b/.test(text) || /\b(?:local|nave|vivienda|puesto flexible)\b/i.test(title)) return null;
+  if (!/(alquiler|rent|lease|arrendamiento)/i.test(title) || /(venta|sale|coworking|centro de negocios)/i.test(title) || !/(oficina|office)/i.test(title)) return null;
+  if (!/\b280\d{2}\b/i.test(text) && !/\bMadrid\b/i.test(text)) return null;
+  if (/\b(?:local|nave|vivienda|puesto flexible)\b/i.test(title)) return null;
 
   const area = findNumber(text, [
-    /(?:superficie|área|area|surface|built area|lettable area)[^\d]{0,45}(\d[\d.,]*)\s*m(?:2|²)/i,
+    /(?:superficie|área|area|surface|built area|lettable area|superficie disponible)[^\d]{0,80}(\d[\d.,]*)\s*m(?:2|²)/i,
+    /(\d[\d.,]*)\s*m(?:2|²)\s*(?:de oficina|de superficie|útiles|construidos)/i,
   ]);
-  const rent = monthlyRate(text, ['renta', 'alquiler', 'rent']);
+  const rent = monthlyRate(text, ['renta', 'alquiler', 'rent', 'asking rent', 'precio']);
   if (!area || rent === null) return null;
 
   const community = monthlyRate(text, ['gastos de comunidad', 'comunidad', 'service charge', 'maintenance charge', 'gastos de mantenimiento']);
   const ibi = monthlyRate(text, ['ibi', 'impuesto sobre bienes inmuebles']);
-  const addressMatch = html.match(/(?:streetAddress|address)[^>:"']{0,30}["']([^"']{8,160})["']/i);
+  const addressMatch = html.match(/(?:streetAddress|address)[^>:"']{0,50}["']([^"']{8,200})["']/i);
   const address = addressMatch?.[1] ? clean(addressMatch[1]) : 'Madrid capital · dirección por confirmar';
   const complete = community !== null && ibi !== null;
   return {
@@ -104,7 +102,7 @@ function parsePage(html: string, url: string, source: string): Listing | null {
 
 function unwrap(href: string): string {
   try {
-    const url = new URL(href, 'https://duckduckgo.com');
+    const url = new URL(decode(href), 'https://duckduckgo.com');
     return url.searchParams.get('uddg') || url.href;
   } catch { return href; }
 }
@@ -113,37 +111,63 @@ function isAllowedHost(url: URL, domain: string): boolean {
   return url.protocol === 'https:' && (url.hostname === domain || url.hostname.endsWith('.' + domain));
 }
 
+function extractResultLinks(html: string, domain: string): string[] {
+  const links: string[] = [];
+  for (const match of html.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/gi)) {
+    const attrs = match[1];
+    if (!/(?:^|\s)class\s*=\s*["'][^"']*\bresult__a\b/i.test(attrs)) continue;
+    const href = attrs.match(/\bhref\s*=\s*["']([^"']+)["']/i)?.[1];
+    if (!href) continue;
+    const target = unwrap(href);
+    try {
+      const parsed = new URL(target);
+      if (isAllowedHost(parsed, domain) && !links.includes(parsed.href)) links.push(parsed.href);
+    } catch { /* Ignore malformed search result URLs. */ }
+  }
+  return links.slice(0, 5);
+}
+
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const queryText = (searchParams.get('q') || '').trim().slice(0, 80);
-  const query = encodeURIComponent('oficinas en alquiler ' + queryText + ' Madrid site:');
-  const perSource = await Promise.all(sources.map(async (source) => {
-    try {
-      const response = await fetch('https://html.duckduckgo.com/html/?q=' + query + source.domain + ' -venta -coworking', {
-        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; MadridOfficeMarket/2.0)' },
-        signal: AbortSignal.timeout(8000), cache: 'no-store',
-      });
-      if (!response.ok) return [];
-      const html = await response.text();
-      const candidates = [...html.matchAll(/<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi)]
-        .map((match) => ({ url: unwrap(match[1]) }))
-        .filter((item) => {
-          try { return isAllowedHost(new URL(item.url), source.domain); } catch { return false; }
-        }).slice(0, 3);
+  const diagnostics: { source: string; candidates: number; extracted: number; issue?: string }[] = [];
 
+  const perSource = await Promise.all(sources.map(async (source) => {
+    let candidates: string[] = [];
+    try {
+      const params = new URLSearchParams({
+        q: 'oficinas en alquiler ' + queryText + ' Madrid site:' + source.domain + ' -venta -coworking',
+      });
+      const response = await fetch('https://html.duckduckgo.com/html/?' + params.toString(), {
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; MadridOfficeMarket/2.1)', Accept: 'text/html' },
+        signal: AbortSignal.timeout(10000), cache: 'no-store',
+      });
+      if (!response.ok) {
+        diagnostics.push({ source: source.name, candidates: 0, extracted: 0, issue: 'Buscador HTTP ' + response.status });
+        return [];
+      }
+      candidates = extractResultLinks(await response.text(), source.domain);
       const parsed = await Promise.all(candidates.map(async (candidate) => {
         try {
-          const page = await fetch(candidate.url, {
-            headers: { 'User-Agent': 'Mozilla/5.0 (compatible; MadridOfficeMarket/2.0)' },
-            signal: AbortSignal.timeout(6000), redirect: 'follow', cache: 'no-store',
+          const page = await fetch(candidate, {
+            headers: { 'User-Agent': 'Mozilla/5.0 (compatible; MadridOfficeMarket/2.1)', Accept: 'text/html' },
+            signal: AbortSignal.timeout(8000), redirect: 'follow', cache: 'no-store',
           });
           const finalUrl = new URL(page.url);
           if (!page.ok || !isAllowedHost(finalUrl, source.domain)) return null;
           return parsePage(await page.text(), finalUrl.href, source.name);
         } catch { return null; }
       }));
-      return parsed.filter((item): item is Listing => item !== null);
-    } catch { return []; }
+      const results = parsed.filter((item): item is Listing => item !== null);
+      diagnostics.push({ source: source.name, candidates: candidates.length, extracted: results.length });
+      return results;
+    } catch (error) {
+      diagnostics.push({
+        source: source.name, candidates: candidates.length, extracted: 0,
+        issue: error instanceof Error ? error.name : 'Error de consulta',
+      });
+      return [];
+    }
   }));
 
   const unique = perSource.flat().filter((item, index, all) =>
@@ -153,8 +177,9 @@ export async function GET(request: Request) {
   return NextResponse.json({
     listings: unique,
     message: unique.length
-      ? 'Fichas con superficie y renta expresada explícitamente por m² y mes. Los gastos solo se muestran si el anuncio publica una tarifa identificable.'
-      : 'No se han podido extraer fichas verificables en esta búsqueda. Los portales pueden limitar consultas automatizadas; prueba otra zona o añade anuncios manualmente.',
+      ? 'Fichas con superficie y renta identificables. Comunidad e IBI solo se muestran cuando se detectan con una unidad y un periodo claros.'
+      : 'La búsqueda se ha ejecutado, pero no se han podido extraer fichas verificables. Consulta el detalle por fuente o añade anuncios manualmente.',
     sources: sources.map((source) => source.name),
+    diagnostics,
   }, { headers: { 'Cache-Control': 'no-store' } });
 }

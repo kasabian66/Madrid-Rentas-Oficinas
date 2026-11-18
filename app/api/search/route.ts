@@ -101,7 +101,7 @@ function getJsonLdAddress(html: string): { street: string; locality: string; pos
   };
 
   for (const script of scripts) {
-    const raw = script.replace(/^.*?>/s, '').replace(/<\/script>\s*$/i, '');
+    const raw = script.replace(/^[\\s\\S]*?>/, '').replace(/<\/script>\s*$/i, '');
     try { visit(JSON.parse(raw)); } catch { /* Ignore malformed structured data. */ }
   }
   return addresses.find((item) =>

@@ -5,10 +5,21 @@ export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
 
 type Listing = {
-  id: string; title: string; address: string; district: string;
-  area: number | null; rent: number | null; community: number | null; ibi: number | null;
-  url: string; source: string; status: string; checkedAt: string;
+  id: string;
+  title: string;
+  address: string;
+  district: string;
+  area: number | null;
+  rent: number | null;
+  community: number | null;
+  ibi: number | null;
+  url: string;
+  source: string;
+  status: string;
+  checkedAt: string;
 };
+
+type TavilyResult = { url?: string; title?: string; content?: string };
 
 const sources = [
   { name: 'Belbex', domain: 'belbex.com' },
@@ -21,7 +32,8 @@ const sources = [
 
 const decode = (value: string) => value
   .replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'")
-  .replace(/&nbsp;|&#160;/g, ' ').replace(/&#x2F;/gi, '/');
+  .replace(/&nbsp;|&#160;/g, ' ').replace(/&#x2F;/gi, '/')
+  .replace(/&#(\d+);/g, (_, n: string) => String.fromCharCode(Number(n)));
 
 const clean = (value: string) => decode(value)
   .replace(/<script[\s\S]*?<\/script>/gi, ' ')
@@ -70,38 +82,102 @@ function extractDistrict(text: string): string {
   return districts.find((district) => text.toLocaleLowerCase('es').includes(district.toLocaleLowerCase('es'))) ?? 'Sin determinar';
 }
 
-function parsePage(html: string, url: string, source: string): Listing | null {
+function getJsonLdAddress(html: string): { street: string; locality: string; postalCode: string } | null {
+  const scripts = html.match(/<script[^>]*type=["']application\/ld\+json["'][^>]*>[\s\S]*?<\/script>/gi) ?? [];
+  const addresses: { street: string; locality: string; postalCode: string }[] = [];
+
+  const visit = (value: unknown): void => {
+    if (Array.isArray(value)) { value.forEach(visit); return; }
+    if (!value || typeof value !== 'object') return;
+    const obj = value as Record<string, unknown>;
+    if (obj.address && typeof obj.address === 'object') {
+      const address = obj.address as Record<string, unknown>;
+      const street = typeof address.streetAddress === 'string' ? address.streetAddress : '';
+      const locality = typeof address.addressLocality === 'string' ? address.addressLocality : '';
+      const postalCode = typeof address.postalCode === 'string' ? address.postalCode : '';
+      if (street || locality || postalCode) addresses.push({ street, locality, postalCode });
+    }
+    Object.values(obj).forEach(visit);
+  };
+
+  for (const script of scripts) {
+    const raw = script.replace(/^.*?>/s, '').replace(/<\/script>\s*$/i, '');
+    try { visit(JSON.parse(raw)); } catch { /* Ignore malformed structured data. */ }
+  }
+  return addresses.find((item) =>
+    /madrid/i.test(item.locality) || /^280\d{2}$/.test(item.postalCode)
+  ) ?? null;
+}
+
+function getPageTitle(html: string, fallback: string): string {
+  const og = html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i)?.[1];
+  const title = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1];
+  return clean(og || title || fallback).slice(0, 180);
+}
+
+function isGenericPage(url: URL, title: string): boolean {
+  const parts = url.pathname.toLowerCase().split('/').filter(Boolean);
+  const last = parts.at(-1) ?? '';
+  const genericSlugs = new Set([
+    'madrid', 'oficina', 'oficinas', 'office', 'offices', 'alquiler', 'rent',
+    'lease', 'properties', 'property', 'listado', 'listings', 'search', 'inmuebles',
+  ]);
+  if (!last || genericSlugs.has(last)) return true;
+  if (/^(alquiler|rent|lease)\s+(de\s+)?(oficinas?|offices?)\s*(en\s+madrid)?$/i.test(title.trim())) return true;
+  return false;
+}
+
+function parsePage(html: string, url: string, source: string, searchResult: TavilyResult): Listing | null {
   let parsedUrl: URL;
   try { parsedUrl = new URL(url); } catch { return null; }
-  const text = clean(html);
-  const title = clean((html.match(/<title[^>]*>([\s\S]*?)<\/title>/i) ?? [])[1] ?? '');
-  if (!/(alquiler|rent|lease|arrendamiento)/i.test(title) || /(venta|sale|coworking|centro de negocios)/i.test(title) || !/(oficina|office)/i.test(title)) return null;
-  if (!/\b280\d{2}\b/i.test(text) && !/\bMadrid\b/i.test(text)) return null;
-  if (/\b(?:local|nave|vivienda|puesto flexible)\b/i.test(title)) return null;
+  const title = getPageTitle(html, searchResult.title || '');
+  const combinedText = [clean(html), searchResult.title || '', searchResult.content || ''].join(' ');
+  const normalizedTitle = title.toLocaleLowerCase('es');
 
-  const area = findNumber(text, [
-    /(?:superficie|área|area|surface|built area|lettable area|superficie disponible)[^\d]{0,80}(\d[\d.,]*)\s*m(?:2|²)/i,
-    /(\d[\d.,]*)\s*m(?:2|²)\s*(?:de oficina|de superficie|útiles|construidos)/i,
+  if (!/(alquiler|rent|lease|arrendamiento)/i.test(normalizedTitle)) return null;
+  if (/(venta|sale|coworking|centro de negocios|flexible office|puesto de trabajo)/i.test(normalizedTitle)) return null;
+  if (!/(oficina|office)/i.test(normalizedTitle)) return null;
+  if (/\b(?:local|nave|vivienda|puesto flexible)\b/i.test(normalizedTitle)) return null;
+  if (isGenericPage(parsedUrl, title)) return null;
+
+  // A result is only admitted when the page itself provides a verifiable Madrid address.
+  const structuredAddress = getJsonLdAddress(html);
+  if (!structuredAddress) return null;
+  const addressParts = [structuredAddress.street, structuredAddress.postalCode, structuredAddress.locality].filter(Boolean);
+  const address = addressParts.join(', ');
+  if (!address || !(/madrid/i.test(structuredAddress.locality) || /^280\d{2}$/.test(structuredAddress.postalCode))) return null;
+
+  const area = findNumber(combinedText, [
+    /(?:superficie|área|area|surface|built area|lettable area|superficie disponible|available area)[^\d]{0,100}(\d[\d.,]*)\s*m(?:2|²)/i,
+    /(\d[\d.,]*)\s*m(?:2|²)\s*(?:de oficina|de superficie|útiles|construidos|available)/i,
   ]);
-  const rent = monthlyRate(text, ['renta', 'alquiler', 'rent', 'asking rent', 'precio']);
-  // Keep verified office-rental pages even when the portal does not publish
-  // area or rent in machine-readable text. Missing values remain null.
+  const rent = monthlyRate(combinedText, ['renta', 'alquiler', 'rent', 'asking rent', 'precio']);
+  const community = monthlyRate(combinedText, ['gastos de comunidad', 'comunidad', 'service charge', 'maintenance charge', 'gastos de mantenimiento']);
+  const ibi = monthlyRate(combinedText, ['ibi', 'impuesto sobre bienes inmuebles']);
 
-  const community = monthlyRate(text, ['gastos de comunidad', 'comunidad', 'service charge', 'maintenance charge', 'gastos de mantenimiento']);
-  const ibi = monthlyRate(text, ['ibi', 'impuesto sobre bienes inmuebles']);
-  const addressMatch = html.match(/(?:streetAddress|address)[^>:"']{0,50}["']([^"']{8,200})["']/i);
-  const address = addressMatch?.[1] ? clean(addressMatch[1]) : 'Madrid capital · dirección por confirmar';
-  const complete = rent !== null && community !== null && ibi !== null;
+  const missing: string[] = [];
+  if (area === null) missing.push('superficie');
+  if (rent === null) missing.push('renta');
+  if (community === null) missing.push('comunidad');
+  if (ibi === null) missing.push('IBI');
+
   return {
-    id: parsedUrl.href, title: title || 'Oficina en alquiler', address,
-    district: extractDistrict(address), area, rent, community, ibi,
-    url: parsedUrl.href, source,
-    status: complete ? 'Renta, comunidad e IBI detectados' : 'Ficha localizada · datos económicos parciales o pendientes',
+    id: parsedUrl.href,
+    title,
+    address,
+    district: extractDistrict(address),
+    area,
+    rent,
+    community,
+    ibi,
+    url: parsedUrl.href,
+    source,
+    status: missing.length ? 'Anuncio individual verificado · pendiente: ' + missing.join(', ') : 'Datos publicados detectados',
     checkedAt: new Date().toISOString().slice(0, 10),
   };
 }
 
-async function searchTavily(query: string, domain: string): Promise<string[]> {
+async function searchTavily(query: string, domain: string): Promise<TavilyResult[]> {
   const apiKey = process.env.TAVILY_API_KEY;
   if (!apiKey) throw new Error('Falta configurar TAVILY_API_KEY en Vercel');
 
@@ -122,14 +198,11 @@ async function searchTavily(query: string, domain: string): Promise<string[]> {
   });
 
   if (!response.ok) throw new Error('Tavily HTTP ' + response.status);
-  const data = await response.json() as { results?: { url?: string }[] };
-  return (data.results ?? [])
-    .map((item) => item.url)
-    .filter((url): url is string => {
-      if (!url) return false;
-      try { return isAllowedHost(new URL(url), domain); } catch { return false; }
-    })
-    .slice(0, 5);
+  const data = await response.json() as { results?: TavilyResult[] };
+  return (data.results ?? []).filter((item) => {
+    if (!item.url) return false;
+    try { return isAllowedHost(new URL(item.url), domain); } catch { return false; }
+  }).slice(0, 5);
 }
 
 function isAllowedHost(url: URL, domain: string): boolean {
@@ -142,21 +215,26 @@ export async function GET(request: Request) {
   const diagnostics: { source: string; candidates: number; extracted: number; issue?: string }[] = [];
 
   const perSource = await Promise.all(sources.map(async (source) => {
-    let candidates: string[] = [];
+    let candidates: TavilyResult[] = [];
     try {
       candidates = await searchTavily(
-        'oficinas en alquiler ' + queryText + ' Madrid capital. Excluir venta, coworking y centros de negocios.',
+        'anuncio individual oficina en alquiler ' + queryText +
+        ' Madrid capital. Dirección postal en Madrid, superficie disponible, renta de alquiler. Excluir páginas de búsqueda, venta, coworking y centros de negocios.',
         source.domain,
       );
       const parsed = await Promise.all(candidates.map(async (candidate) => {
         try {
-          const page = await fetch(candidate, {
-            headers: { 'User-Agent': 'Mozilla/5.0 (compatible; MadridOfficeMarket/2.1)', Accept: 'text/html' },
-            signal: AbortSignal.timeout(8000), redirect: 'follow', cache: 'no-store',
+          const candidateUrl = new URL(candidate.url!);
+          if (isGenericPage(candidateUrl, candidate.title || '')) return null;
+          const page = await fetch(candidateUrl.href, {
+            headers: { 'User-Agent': 'Mozilla/5.0 (compatible; MadridOfficeMarket/2.2)', Accept: 'text/html' },
+            signal: AbortSignal.timeout(8000),
+            redirect: 'follow',
+            cache: 'no-store',
           });
           const finalUrl = new URL(page.url);
-          if (!page.ok || !isAllowedHost(finalUrl, source.domain)) return null;
-          return parsePage(await page.text(), finalUrl.href, source.name);
+          if (!page.ok || !isAllowedHost(finalUrl, source.domain) || isGenericPage(finalUrl, candidate.title || '')) return null;
+          return parsePage(await page.text(), finalUrl.href, source.name, candidate);
         } catch { return null; }
       }));
       const results = parsed.filter((item): item is Listing => item !== null);
@@ -164,7 +242,9 @@ export async function GET(request: Request) {
       return results;
     } catch (error) {
       diagnostics.push({
-        source: source.name, candidates: candidates.length, extracted: 0,
+        source: source.name,
+        candidates: candidates.length,
+        extracted: 0,
         issue: error instanceof Error ? error.message : 'Error de consulta',
       });
       return [];
@@ -178,8 +258,10 @@ export async function GET(request: Request) {
   return NextResponse.json({
     listings: unique,
     message: unique.length
-      ? 'Fichas con superficie y renta identificables. Comunidad e IBI solo se muestran cuando se detectan con una unidad y un periodo claros.'
-      : diagnostics.some((item) => item.issue?.includes('TAVILY_API_KEY')) ? 'Falta configurar la clave gratuita de Tavily en Vercel.' : 'La búsqueda se ha ejecutado, pero no se han podido extraer fichas verificables. Consulta el detalle por fuente o añade anuncios manualmente.',
+      ? 'Anuncios individuales con dirección de Madrid verificada. Los datos económicos no publicados aparecen como pendientes y no se estiman.'
+      : diagnostics.some((item) => item.issue?.includes('TAVILY_API_KEY'))
+        ? 'Falta configurar la clave gratuita de Tavily en Vercel.'
+        : 'No se han encontrado anuncios individuales con dirección de Madrid verificable. No se muestran páginas generales ni resultados sin ubicación confirmada.',
     sources: sources.map((source) => source.name),
     diagnostics,
   }, { headers: { 'Cache-Control': 'no-store' } });

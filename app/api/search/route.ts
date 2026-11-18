@@ -95,7 +95,7 @@ function parsePage(html: string, url: string, source: string): Listing | null {
   const complete = community !== null && ibi !== null;
   return {
     id: parsedUrl.href, title: title || 'Oficina en alquiler', address,
-    district: extractDistrict(text + ' ' + address), area, rent, community, ibi,
+    district: extractDistrict(address), area, rent, community, ibi,
     url: parsedUrl.href, source,
     status: complete ? 'Renta, comunidad e IBI detectados' : 'Datos parciales · importes no publicados pendientes',
     checkedAt: new Date().toISOString().slice(0, 10),

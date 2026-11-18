@@ -84,18 +84,19 @@ function parsePage(html: string, url: string, source: string): Listing | null {
     /(\d[\d.,]*)\s*m(?:2|²)\s*(?:de oficina|de superficie|útiles|construidos)/i,
   ]);
   const rent = monthlyRate(text, ['renta', 'alquiler', 'rent', 'asking rent', 'precio']);
-  if (!area || rent === null) return null;
+  // Keep verified office-rental pages even when the portal does not publish
+  // area or rent in machine-readable text. Missing values remain null.
 
   const community = monthlyRate(text, ['gastos de comunidad', 'comunidad', 'service charge', 'maintenance charge', 'gastos de mantenimiento']);
   const ibi = monthlyRate(text, ['ibi', 'impuesto sobre bienes inmuebles']);
   const addressMatch = html.match(/(?:streetAddress|address)[^>:"']{0,50}["']([^"']{8,200})["']/i);
   const address = addressMatch?.[1] ? clean(addressMatch[1]) : 'Madrid capital · dirección por confirmar';
-  const complete = community !== null && ibi !== null;
+  const complete = rent !== null && community !== null && ibi !== null;
   return {
     id: parsedUrl.href, title: title || 'Oficina en alquiler', address,
     district: extractDistrict(address), area, rent, community, ibi,
     url: parsedUrl.href, source,
-    status: complete ? 'Renta, comunidad e IBI detectados' : 'Datos parciales · importes no publicados pendientes',
+    status: complete ? 'Renta, comunidad e IBI detectados' : 'Ficha localizada · datos económicos parciales o pendientes',
     checkedAt: new Date().toISOString().slice(0, 10),
   };
 }
@@ -115,7 +116,7 @@ function extractResultLinks(html: string, domain: string): string[] {
   const links: string[] = [];
   for (const match of html.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/gi)) {
     const attrs = match[1];
-    if (!/(?:^|\s)class\s*=\s*["'][^"']*\bresult__a\b/i.test(attrs)) continue;
+    // Do not depend on DuckDuckGo CSS classes: its result markup changes frequently.
     const href = attrs.match(/\bhref\s*=\s*["']([^"']+)["']/i)?.[1];
     if (!href) continue;
     const target = unwrap(href);

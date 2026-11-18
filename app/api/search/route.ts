@@ -112,8 +112,8 @@ function extractBingResultLinks(xml: string, domain: string): string[] {
   const links: string[] = [];
   const items = xml.split(/<item[^>]*>/i).slice(1);
   for (const item of items) {
-    const block = item.split(/<\\/item>/i)[0] || '';
-    const match = block.match(/<link[^>]*>([^<]+)<\\/link>/i);
+    const block = item.split(/<\/item>/i)[0] || '';
+    const match = block.match(/<link[^>]*>([^<]+)<\/link>/i);
     if (!match?.[1]) continue;
     const href = decode(match[1].trim());
     try {

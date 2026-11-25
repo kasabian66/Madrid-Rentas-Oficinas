@@ -1,27 +1,13 @@
 import { NextResponse } from 'next/server';
-import { clean, findNumber, monthlyRate, isGenericPage, isAllowedHost } from '../../../lib/parse';
+import { isGenericPage, isAllowedHost, parseListingText } from '../../../lib/parse';
+import type { Listing, Rejection } from '../../../lib/parse';
 import { rateLimit } from '../../../lib/rateLimit';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
 
-type Listing = {
-  id: string;
-  title: string;
-  address: string;
-  district: string;
-  area: number | null;
-  rent: number | null;
-  community: number | null;
-  ibi: number | null;
-  url: string;
-  source: string;
-  status: string;
-  checkedAt: string;
-};
-
-type TavilyResult = { url?: string; title?: string; content?: string };
+type TavilyResult = { url?: string; title?: string; content?: string; raw_content?: string | null };
 
 const sources = [
   { name: 'Belbex', domain: 'belbex.com' },
@@ -32,118 +18,25 @@ const sources = [
   { name: 'Cushman & Wakefield', domain: 'cushmanwakefield.com' },
 ];
 
-function extractDistrict(text: string): string {
-  const districts = [
-    'Salamanca', 'Chamartín', 'Chamberí', 'Centro', 'Tetuán', 'Moncloa-Aravaca',
-    'Retiro', 'Arganzuela', 'Fuencarral-El Pardo', 'Ciudad Lineal', 'Hortaleza',
-    'Usera', 'Carabanchel', 'Latina', 'Puente de Vallecas', 'Moratalaz',
-    'Villaverde', 'Villa de Vallecas', 'San Blas-Canillejas', 'Barajas',
-  ];
-  return districts.find((district) => text.toLocaleLowerCase('es').includes(district.toLocaleLowerCase('es'))) ?? 'Sin determinar';
-}
-
-function getJsonLdAddress(html: string): { street: string; locality: string; postalCode: string } | null {
-  const scripts = html.match(/<script[^>]*type=["']application\/ld\+json["'][^>]*>[\s\S]*?<\/script>/gi) ?? [];
-  const addresses: { street: string; locality: string; postalCode: string }[] = [];
-
-  const visit = (value: unknown): void => {
-    if (Array.isArray(value)) { value.forEach(visit); return; }
-    if (!value || typeof value !== 'object') return;
-    const obj = value as Record<string, unknown>;
-    if (obj.address && typeof obj.address === 'object') {
-      const address = obj.address as Record<string, unknown>;
-      const street = typeof address.streetAddress === 'string' ? address.streetAddress : '';
-      const locality = typeof address.addressLocality === 'string' ? address.addressLocality : '';
-      const postalCode = typeof address.postalCode === 'string' ? address.postalCode : '';
-      if (street || locality || postalCode) addresses.push({ street, locality, postalCode });
-    }
-    Object.values(obj).forEach(visit);
-  };
-
-  for (const script of scripts) {
-    const raw = script.replace(/^[\\s\\S]*?>/, '').replace(/<\/script>\s*$/i, '');
-    try { visit(JSON.parse(raw)); } catch { /* Ignore malformed structured data. */ }
-  }
-  return addresses.find((item) =>
-    /madrid/i.test(item.locality) || /^280\d{2}$/.test(item.postalCode)
-  ) ?? null;
-}
-
-function getPageTitle(html: string, fallback: string): string {
-  const og = html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i)?.[1];
-  const title = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1];
-  return clean(og || title || fallback).slice(0, 180);
-}
-
-type Rejection = { reason: string };
-
-function parsePage(html: string, url: string, source: string, searchResult: TavilyResult): Listing | Rejection {
-  let parsedUrl: URL;
-  try { parsedUrl = new URL(url); } catch { return { reason: 'url_invalida' }; }
-  const title = getPageTitle(html, searchResult.title || '');
-  const combinedText = [clean(html), searchResult.title || '', searchResult.content || ''].join(' ');
-  const normalizedTitle = title.toLocaleLowerCase('es');
-
-  if (!/(alquiler|rent|lease|arrendamiento)/i.test(normalizedTitle)) return { reason: 'titulo_sin_alquiler' };
-  if (/(venta|sale|coworking|centro de negocios|flexible office|puesto de trabajo)/i.test(normalizedTitle)) return { reason: 'titulo_excluido' };
-  if (!/(oficina|office)/i.test(normalizedTitle)) return { reason: 'titulo_sin_oficina' };
-  if (/\b(?:local|nave|vivienda|puesto flexible)\b/i.test(normalizedTitle)) return { reason: 'titulo_otro_inmueble' };
-  if (isGenericPage(parsedUrl, title)) return { reason: 'pagina_generica' };
-
-  // A result is only admitted when the page itself provides a verifiable Madrid address.
-  const structuredAddress = getJsonLdAddress(html);
-  if (!structuredAddress) return { reason: 'sin_direccion_jsonld' };
-  const addressParts = [structuredAddress.street, structuredAddress.postalCode, structuredAddress.locality].filter(Boolean);
-  const address = addressParts.join(', ');
-  if (!address || !(/madrid/i.test(structuredAddress.locality) || /^280\d{2}$/.test(structuredAddress.postalCode))) return { reason: 'direccion_no_madrid' };
-
-  const area = findNumber(combinedText, [
-    /(?:superficie|área|area|surface|built area|lettable area|superficie disponible|available area)[^\d]{0,100}(\d[\d.,]*)\s*m(?:2|²)/i,
-    /(\d[\d.,]*)\s*m(?:2|²)\s*(?:de oficina|de superficie|útiles|construidos|available)/i,
-  ]);
-  const rent = monthlyRate(combinedText, ['renta', 'alquiler', 'rent', 'asking rent', 'precio']);
-  const community = monthlyRate(combinedText, ['gastos de comunidad', 'comunidad', 'service charge', 'maintenance charge', 'gastos de mantenimiento']);
-  const ibi = monthlyRate(combinedText, ['ibi', 'impuesto sobre bienes inmuebles']);
-
-  const missing: string[] = [];
-  if (area === null) missing.push('superficie');
-  if (rent === null) missing.push('renta');
-  if (community === null) missing.push('comunidad');
-  if (ibi === null) missing.push('IBI');
-
-  return {
-    id: parsedUrl.href,
-    title,
-    address,
-    district: extractDistrict(address),
-    area,
-    rent,
-    community,
-    ibi,
-    url: parsedUrl.href,
-    source,
-    status: missing.length ? 'Anuncio individual verificado · pendiente: ' + missing.join(', ') : 'Datos publicados detectados',
-    checkedAt: new Date().toISOString().slice(0, 10),
-  };
-}
-
 async function searchTavily(query: string, domain: string): Promise<TavilyResult[]> {
   const apiKey = process.env.TAVILY_API_KEY;
   if (!apiKey) throw new Error('Falta configurar TAVILY_API_KEY en Vercel');
 
+  // Tavily returns the page text itself (include_raw_content), so the portals' pages are never
+  // downloaded from here: this avoids the HTTP 403 blocks many portals apply to server-side requests.
   const response = await fetch('https://api.tavily.com/search', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + apiKey },
     body: JSON.stringify({
-      api_key: apiKey,
       query,
       search_depth: 'basic',
       topic: 'general',
       max_results: 5,
       include_domains: [domain],
       include_answer: false,
+      include_raw_content: true,
     }),
-    signal: AbortSignal.timeout(15000),
+    signal: AbortSignal.timeout(25000),
     cache: 'no-store',
   });
 
@@ -176,23 +69,14 @@ export async function GET(request: Request) {
         ' Madrid capital. Dirección postal en Madrid, superficie disponible, renta de alquiler. Excluir páginas de búsqueda, venta, coworking y centros de negocios.',
         source.domain,
       );
-      const parsed = await Promise.all(candidates.map(async (candidate): Promise<Listing | Rejection> => {
+      const parsed: (Listing | Rejection)[] = candidates.map((candidate) => {
         try {
           const candidateUrl = new URL(candidate.url!);
-          if (isGenericPage(candidateUrl, candidate.title || '')) return { reason: 'pagina_generica_previa' };
-          const page = await fetch(candidateUrl.href, {
-            headers: { 'User-Agent': 'Mozilla/5.0 (compatible; MadridOfficeMarket/2.2)', Accept: 'text/html' },
-            signal: AbortSignal.timeout(8000),
-            redirect: 'follow',
-            cache: 'no-store',
-          });
-          const finalUrl = new URL(page.url);
-          if (!page.ok) return { reason: 'http_' + page.status };
-          if (!isAllowedHost(finalUrl, source.domain)) return { reason: 'redireccion_otro_dominio' };
-          if (isGenericPage(finalUrl, candidate.title || '')) return { reason: 'pagina_generica_final' };
-          return parsePage(await page.text(), finalUrl.href, source.name, candidate);
-        } catch { return { reason: 'error_descarga' }; }
-      }));
+          if (isGenericPage(candidateUrl, candidate.title || '')) return { reason: 'pagina_generica' };
+          const text = candidate.raw_content || candidate.content || '';
+          return parseListingText(text, candidate.title || '', candidateUrl.href, source.name, candidate.content || '');
+        } catch { return { reason: 'error_proceso' }; }
+      });
       const results = parsed.filter((item): item is Listing => !('reason' in item));
       const rejected: Record<string, number> = {};
       for (const item of parsed) if ('reason' in item) rejected[item.reason] = (rejected[item.reason] ?? 0) + 1;

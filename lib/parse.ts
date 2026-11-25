@@ -58,6 +58,7 @@ export function isGenericPage(url: URL, title: string): boolean {
     'lease', 'properties', 'property', 'listado', 'listings', 'search', 'inmuebles',
   ]);
   if (!last || genericSlugs.has(last)) return true;
+  if (parts.some((part) => ['buscar', 'search', 'resultados', 'results'].includes(part))) return true;
   if (/^(alquiler|rent|lease)\s+(de\s+)?(oficinas?|offices?)\s*(en\s+madrid)?$/i.test(title.trim())) return true;
   return false;
 }
@@ -117,7 +118,9 @@ export function findMadridAddress(text: string): string | null {
     );
     const street = (cut >= 0 ? before.slice(cut + 2) : before)
       .replace(/[\s,;·|*#>\-–]+$/g, '').replace(/^[\s,;·|*#>\-–]+/, '').trim();
-    const address = (street ? street + ', ' : '') + match[1] + ' Madrid';
+    // Portals often repeat the street ("María de Molina María de Molina 54"): keep it once.
+    const deduped = street.replace(/^(.{4,40}?)\s+\1(?=\s|$)/i, '$1');
+    const address = (deduped ? deduped + ', ' : '') + match[1] + ' Madrid';
     return address.slice(-120);
   }
   return null;
@@ -151,18 +154,30 @@ export function parseListingText(
   if (!/(alquiler|rent|lease|arrendamiento)/i.test(head)) return { reason: 'sin_alquiler' };
   if (/(venta|for-sale|for sale|sale|coworking|centro de negocios|flexible office|puesto de trabajo)/i.test(titleAndPath)) return { reason: 'titulo_excluido' };
   if (!/(oficina|office)/i.test(head)) return { reason: 'sin_oficina' };
+  if (/(coworking|espacio flex|business cent|centro de negocios|regus|puestos? flexibles?)/i.test(head + ' ' + body.slice(0, 1500))) return { reason: 'coworking' };
   if (/\b(?:local|nave|vivienda|puesto flexible)\b/i.test(pageTitle)) return { reason: 'otro_inmueble' };
 
   // Only admitted when the text itself shows a verifiable Madrid address.
-  const address = findMadridAddress(body);
+  let address = findMadridAddress(body);
+  if (!address) {
+    // LoopNet listing URLs end in "<street>-madrid/<id>" and the text opens with the street name.
+    const slug = path.match(/\/anuncio\/[^/]+-madrid\/\d+/i);
+    const firstLine = text.split('\n').map((line) => stripMarkdown(clean(line))).find((line) => line.length > 0) ?? '';
+    if (slug && firstLine.length <= 80 && /\d/.test(firstLine) && !/[|#]/.test(firstLine)) address = firstLine + ', Madrid';
+  }
   if (!address) return { reason: 'sin_direccion_madrid' };
 
   const combined = [body, pageTitle, clean(snippet)].join(' ');
-  const area = findNumber(combined, [
+  // LoopNet style: "Oficina · 3.999 m² · 103.974 € /mes" gives a total monthly rent for the whole space.
+  const totals = combined.match(/Oficina[\s·|]*(\d[\d.,]*)\s*m(?:2|²)[\s·|]*(\d[\d.,]*)\s*€\s*\/\s*mes/i);
+  const totalArea = totals ? parseNumber(totals[1]) : null;
+  const totalRent = totals ? parseNumber(totals[2]) : null;
+  const area = totalArea ?? findNumber(combined, [
     /(?:superficie|área|area|surface|built area|lettable area|superficie disponible|available area)[^\d]{0,100}(\d[\d.,]*)\s*m(?:2|²)/i,
     /(\d[\d.,]*)\s*m(?:2|²)\s*(?:de oficina|de superficie|útiles|construidos|available)/i,
   ]);
-  const rent = monthlyRate(combined, ['renta', 'alquiler', 'rent', 'asking rent', 'precio']);
+  const rent = monthlyRate(combined, ['renta', 'alquiler', 'rent', 'asking rent', 'precio'])
+    ?? (totalArea && totalRent ? Math.round((totalRent / totalArea) * 100) / 100 : null);
   const community = monthlyRate(combined, ['gastos de comunidad', 'comunidad', 'service charge', 'maintenance charge', 'gastos de mantenimiento']);
   const ibi = monthlyRate(combined, ['ibi', 'impuesto sobre bienes inmuebles']);
 

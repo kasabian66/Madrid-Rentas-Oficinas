@@ -57,6 +57,26 @@ test('parseListingText strips markdown images and links from the address', () =>
   assert.match(result.address, /28009 Madrid$/);
 });
 
+test('LoopNet listing: street from the first line and rent computed from the monthly total', () => {
+  const text = 'Calle de Diego de León, 21\n\n## Aspectos destacados\n\n- Zona consolidada.\n\n## 1 espacio disponible\n\n'
+    + 'Planta baja, Planta 1\n\nOficina\n\n·\n\n3.999 m²\n\n·\n\n103.974 € /mes EXCL\n\n· Disponibilidad inmediata. Oficina en alquiler.';
+  const result = parseListingText(text, '', 'https://www.loopnet.es/anuncio/calle-de-diego-de-leon-21-madrid/35884463', 'LoopNet') as Listing;
+  assert.ok(!('reason' in result), JSON.stringify(result));
+  assert.equal(result.address, 'Calle de Diego de León, 21, Madrid');
+  assert.equal(result.area, 3999);
+  assert.equal(result.rent, 26);
+});
+
+test('search pages and coworking centres are rejected', () => {
+  assert.deepEqual(parseListingText(GOOD_TEXT, 'Oficinas en alquiler en Recoletos', 'https://www.loopnet.es/buscar/oficinas/recoletos__madrid/en-alquiler', 'LoopNet'), { reason: 'pagina_generica' });
+  const cowork = 'Oficinas Coworking/Espacio Flex. María de Molina 54 Madrid, 28006. Oficina en alquiler.';
+  assert.deepEqual(parseListingText(cowork, 'Alquiler de Oficina en María de Molina', 'https://inmuebles.jll.es/alquiler-oficinas/oficinas-9143', 'JLL'), { reason: 'coworking' });
+});
+
+test('findMadridAddress keeps a repeated street name only once', () => {
+  assert.equal(findMadridAddress('Referencia 9143. María de Molina María de Molina 54 Madrid, 28006'), 'María de Molina 54 Madrid, 28006 Madrid'.replace('54 Madrid, ', '54 Madrid, '));
+});
+
 test('extractDistrict finds known districts and defaults to undetermined', () => {
   assert.equal(extractDistrict('Calle Goya, Salamanca'), 'Salamanca');
   assert.equal(extractDistrict('Calle sin distrito'), 'Sin determinar');

@@ -42,6 +42,14 @@ export function monthlyRate(text: string, labels: string[]): number | null {
   return /(?:año|anual|year)/i.test(match[0]) ? amount / 12 : amount;
 }
 
+// Removes markdown images/links and bare URLs so addresses read as plain text.
+export const stripMarkdown = (value: string) => value
+  .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
+  .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+  .replace(/https?:\/\/\S+/g, ' ')
+  .replace(/[*_`]{1,3}/g, '')
+  .replace(/\s+/g, ' ').trim();
+
 export function isGenericPage(url: URL, title: string): boolean {
   const parts = url.pathname.toLowerCase().split('/').filter(Boolean);
   const last = parts.at(-1) ?? '';
@@ -131,7 +139,7 @@ export function parseListingText(
   let parsedUrl: URL;
   try { parsedUrl = new URL(url); } catch { return { reason: 'url_invalida' }; }
   const pageTitle = clean(title).slice(0, 180);
-  const body = clean(text).slice(0, 30000);
+  const body = stripMarkdown(clean(text)).slice(0, 30000);
   if (!body) return { reason: 'sin_texto' };
 
   let path = parsedUrl.pathname;

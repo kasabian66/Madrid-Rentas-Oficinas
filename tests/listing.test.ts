@@ -49,6 +49,14 @@ test('parseListingText rejects generic listing pages and empty text', () => {
   assert.deepEqual(parseListingText('', 'Oficina en alquiler', 'https://www.belbex.com/oficina-x', 'Belbex'), { reason: 'sin_texto' });
 });
 
+test('parseListingText strips markdown images and links from the address', () => {
+  const text = '![](https://img.loopnet.es/x/image.jpg) [Calle de Alcalá, 96](https://www.loopnet.es/anuncio/calle-de-alcala-96-madrid/1/) Salamanca, Madrid, 28009 Madrid. Oficina en alquiler. Superficie 295 m².';
+  const result = parseListingText(text, 'Oficinas en alquiler en Goya', 'https://www.loopnet.es/anuncio/calle-de-alcala-96-madrid/1/', 'LoopNet') as Listing;
+  assert.ok(!('reason' in result));
+  assert.ok(!/[\]\[()]|http/.test(result.address), result.address);
+  assert.match(result.address, /28009 Madrid$/);
+});
+
 test('extractDistrict finds known districts and defaults to undetermined', () => {
   assert.equal(extractDistrict('Calle Goya, Salamanca'), 'Salamanca');
   assert.equal(extractDistrict('Calle sin distrito'), 'Sin determinar');

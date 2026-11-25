@@ -121,7 +121,12 @@ export default function Home() {
       if (!response.ok) throw new Error('HTTP ' + response.status);
       const data: { listings?: unknown; message?: string } = await response.json();
       if (!isListingArray(data.listings)) throw new Error('Respuesta de búsqueda no válida');
-      setItems(data.listings);
+      const found = data.listings;
+      // Keep offers added by hand: a search must only replace automatic results.
+      setItems((previous) => [
+        ...previous.filter((item) => item.source === 'Introducción manual'),
+        ...found.filter((item) => !previous.some((old) => old.source === 'Introducción manual' && old.url && old.url === item.url)),
+      ]);
       setMessage(data.message || 'Búsqueda terminada.');
     } catch {
       setMessage('No se pudo completar la búsqueda. Se mantienen los datos guardados; inténtalo de nuevo más tarde.');

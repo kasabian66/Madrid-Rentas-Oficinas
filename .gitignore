@@ -1,0 +1,7 @@
+node_modules/
+.next/
+.env*
+__pycache__/
+*.pyc
+.vercel/
+next-env.d.ts

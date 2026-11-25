@@ -118,6 +118,10 @@ export default function Home() {
         headers: { Accept: 'application/json' },
         cache: 'no-store',
       });
+      if (response.status === 429) {
+        setMessage('Demasiadas búsquedas seguidas. Espera un minuto y vuelve a intentarlo.');
+        return;
+      }
       if (!response.ok) throw new Error('HTTP ' + response.status);
       const data: { listings?: unknown; message?: string } = await response.json();
       if (!isListingArray(data.listings)) throw new Error('Respuesta de búsqueda no válida');
@@ -291,7 +295,7 @@ export default function Home() {
           <article><b>04 / Coste total</b><p>Suma de renta + comunidad/mantenimiento + IBI, expresada en €/m²/mes.</p></article>
         </div>
       </section>
-      <footer>MADRID OFFICE MARKET <span>Herramienta de análisis · Versión 2.1</span></footer>
+      <footer>MADRID OFFICE MARKET <span>Herramienta de análisis · Versión 2.2</span></footer>
       {manual && (
         <div className="modalbg" onClick={() => setManual(false)}>
           <form className="modal" onClick={(event) => event.stopPropagation()} onSubmit={add}>

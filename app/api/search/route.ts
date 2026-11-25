@@ -75,25 +75,27 @@ function getPageTitle(html: string, fallback: string): string {
   return clean(og || title || fallback).slice(0, 180);
 }
 
-function parsePage(html: string, url: string, source: string, searchResult: TavilyResult): Listing | null {
+type Rejection = { reason: string };
+
+function parsePage(html: string, url: string, source: string, searchResult: TavilyResult): Listing | Rejection {
   let parsedUrl: URL;
-  try { parsedUrl = new URL(url); } catch { return null; }
+  try { parsedUrl = new URL(url); } catch { return { reason: 'url_invalida' }; }
   const title = getPageTitle(html, searchResult.title || '');
   const combinedText = [clean(html), searchResult.title || '', searchResult.content || ''].join(' ');
   const normalizedTitle = title.toLocaleLowerCase('es');
 
-  if (!/(alquiler|rent|lease|arrendamiento)/i.test(normalizedTitle)) return null;
-  if (/(venta|sale|coworking|centro de negocios|flexible office|puesto de trabajo)/i.test(normalizedTitle)) return null;
-  if (!/(oficina|office)/i.test(normalizedTitle)) return null;
-  if (/\b(?:local|nave|vivienda|puesto flexible)\b/i.test(normalizedTitle)) return null;
-  if (isGenericPage(parsedUrl, title)) return null;
+  if (!/(alquiler|rent|lease|arrendamiento)/i.test(normalizedTitle)) return { reason: 'titulo_sin_alquiler' };
+  if (/(venta|sale|coworking|centro de negocios|flexible office|puesto de trabajo)/i.test(normalizedTitle)) return { reason: 'titulo_excluido' };
+  if (!/(oficina|office)/i.test(normalizedTitle)) return { reason: 'titulo_sin_oficina' };
+  if (/\b(?:local|nave|vivienda|puesto flexible)\b/i.test(normalizedTitle)) return { reason: 'titulo_otro_inmueble' };
+  if (isGenericPage(parsedUrl, title)) return { reason: 'pagina_generica' };
 
   // A result is only admitted when the page itself provides a verifiable Madrid address.
   const structuredAddress = getJsonLdAddress(html);
-  if (!structuredAddress) return null;
+  if (!structuredAddress) return { reason: 'sin_direccion_jsonld' };
   const addressParts = [structuredAddress.street, structuredAddress.postalCode, structuredAddress.locality].filter(Boolean);
   const address = addressParts.join(', ');
-  if (!address || !(/madrid/i.test(structuredAddress.locality) || /^280\d{2}$/.test(structuredAddress.postalCode))) return null;
+  if (!address || !(/madrid/i.test(structuredAddress.locality) || /^280\d{2}$/.test(structuredAddress.postalCode))) return { reason: 'direccion_no_madrid' };
 
   const area = findNumber(combinedText, [
     /(?:superficie|área|area|surface|built area|lettable area|superficie disponible|available area)[^\d]{0,100}(\d[\d.,]*)\s*m(?:2|²)/i,
@@ -164,7 +166,7 @@ export async function GET(request: Request) {
   }
   const { searchParams } = new URL(request.url);
   const queryText = (searchParams.get('q') || '').trim().slice(0, 80);
-  const diagnostics: { source: string; candidates: number; extracted: number; issue?: string }[] = [];
+  const diagnostics: { source: string; candidates: number; extracted: number; issue?: string; rejected?: Record<string, number> }[] = [];
 
   const perSource = await Promise.all(sources.map(async (source) => {
     let candidates: TavilyResult[] = [];
@@ -174,10 +176,10 @@ export async function GET(request: Request) {
         ' Madrid capital. Dirección postal en Madrid, superficie disponible, renta de alquiler. Excluir páginas de búsqueda, venta, coworking y centros de negocios.',
         source.domain,
       );
-      const parsed = await Promise.all(candidates.map(async (candidate) => {
+      const parsed = await Promise.all(candidates.map(async (candidate): Promise<Listing | Rejection> => {
         try {
           const candidateUrl = new URL(candidate.url!);
-          if (isGenericPage(candidateUrl, candidate.title || '')) return null;
+          if (isGenericPage(candidateUrl, candidate.title || '')) return { reason: 'pagina_generica_previa' };
           const page = await fetch(candidateUrl.href, {
             headers: { 'User-Agent': 'Mozilla/5.0 (compatible; MadridOfficeMarket/2.2)', Accept: 'text/html' },
             signal: AbortSignal.timeout(8000),
@@ -185,12 +187,16 @@ export async function GET(request: Request) {
             cache: 'no-store',
           });
           const finalUrl = new URL(page.url);
-          if (!page.ok || !isAllowedHost(finalUrl, source.domain) || isGenericPage(finalUrl, candidate.title || '')) return null;
+          if (!page.ok) return { reason: 'http_' + page.status };
+          if (!isAllowedHost(finalUrl, source.domain)) return { reason: 'redireccion_otro_dominio' };
+          if (isGenericPage(finalUrl, candidate.title || '')) return { reason: 'pagina_generica_final' };
           return parsePage(await page.text(), finalUrl.href, source.name, candidate);
-        } catch { return null; }
+        } catch { return { reason: 'error_descarga' }; }
       }));
-      const results = parsed.filter((item): item is Listing => item !== null);
-      diagnostics.push({ source: source.name, candidates: candidates.length, extracted: results.length });
+      const results = parsed.filter((item): item is Listing => !('reason' in item));
+      const rejected: Record<string, number> = {};
+      for (const item of parsed) if ('reason' in item) rejected[item.reason] = (rejected[item.reason] ?? 0) + 1;
+      diagnostics.push({ source: source.name, candidates: candidates.length, extracted: results.length, rejected });
       return results;
     } catch (error) {
       diagnostics.push({

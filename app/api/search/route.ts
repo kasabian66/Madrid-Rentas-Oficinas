@@ -59,6 +59,8 @@ export async function GET(request: Request) {
   }
   const { searchParams } = new URL(request.url);
   const queryText = (searchParams.get('q') || '').trim().slice(0, 80);
+  const debug = searchParams.get('debug') === '1'; // TEMPORARY
+  const samples: { url: string; text: string }[] = []; // TEMPORARY
   const diagnostics: { source: string; candidates: number; extracted: number; issue?: string; rejected?: Record<string, number> }[] = [];
 
   const perSource = await Promise.all(sources.map(async (source) => {
@@ -74,6 +76,7 @@ export async function GET(request: Request) {
           const candidateUrl = new URL(candidate.url!);
           if (isGenericPage(candidateUrl, candidate.title || '')) return { reason: 'pagina_generica' };
           const text = candidate.raw_content || candidate.content || '';
+          if (debug) samples.push({ url: candidate.url!, text: text.slice(0, 2500) });
           return parseListingText(text, candidate.title || '', candidateUrl.href, source.name, candidate.content || '');
         } catch { return { reason: 'error_proceso' }; }
       });
@@ -106,5 +109,6 @@ export async function GET(request: Request) {
         : 'No se han encontrado anuncios individuales con dirección de Madrid verificable. No se muestran páginas generales ni resultados sin ubicación confirmada.',
     sources: sources.map((source) => source.name),
     diagnostics,
+    ...(debug ? { samples } : {}),
   }, { headers: { 'Cache-Control': 'no-store' } });
 }
